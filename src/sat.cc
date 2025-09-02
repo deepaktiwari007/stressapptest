@@ -1881,26 +1881,9 @@ inline time_t NextOccurance(time_t frequency, time_t start, time_t now) {
 }
 
 // Run the actual test.
+
 bool Sat::Run() {
   // Install signal handlers to gracefully exit in the middle of a run.
-  //
-  // Why go through this whole rigmarole?  It's the only standards-compliant
-  // (C++ and POSIX) way to handle signals in a multithreaded program.
-  // Specifically:
-  //
-  // 1) (C++) The value of a variable not of type "volatile sig_atomic_t" is
-  //    unspecified upon entering a signal handler and, if modified by the
-  //    handler, is unspecified after leaving the handler.
-  //
-  // 2) (POSIX) After the value of a variable is changed in one thread, another
-  //    thread is only guaranteed to see the new value after both threads have
-  //    acquired or released the same mutex or rwlock, synchronized to the
-  //    same barrier, or similar.
-  //
-  // #1 prevents the use of #2 in a signal handler, so the signal handler must
-  // be called in the same thread that reads the "volatile sig_atomic_t"
-  // variable it sets.  We enforce that by blocking the signals in question in
-  // the worker threads, forcing them to be handled by this thread.
   logprintf(12, "Log: Installing signal handlers\n");
   sigset_t new_blocked_signals;
   sigemptyset(&new_blocked_signals);
@@ -1920,11 +1903,8 @@ bool Sat::Run() {
   logprintf(12, "Log: Starting countdown with %d seconds\n", runtime_seconds_);
 
   // In seconds.
-  static const time_t kSleepFrequency = 5;
-  // All of these are in seconds.  You probably want them to be >=
-  // kSleepFrequency and multiples of kSleepFrequency, but neither is necessary.
+  static const time_t kSleepFrequency = 1;  // Changed to 1 for more precise timing
   static const time_t kInjectionFrequency = 10;
-  // print_delay_ determines "seconds remaining" chatty update.
 
   const time_t start = time(NULL);
   const time_t end = start + runtime_seconds_;
@@ -1932,46 +1912,29 @@ bool Sat::Run() {
   time_t next_print = start + print_delay_;
   time_t next_pause = start + pause_delay_;
   time_t next_resume = 0;
-  time_t next_injection;
-  if (crazy_error_injection_) {
-    next_injection = start + kInjectionFrequency;
-  } else {
-    next_injection = 0;
-  }
+  time_t next_injection = crazy_error_injection_ ? start + kInjectionFrequency : 0;
 
   while (now < end) {
-    // This is an int because it's for logprintf().
     const int seconds_remaining = end - now;
 
     if (user_break_) {
-      // Handle early exit.
-      logprintf(0, "Log: User exiting early (%d seconds remaining)\n",
-                seconds_remaining);
+      logprintf(0, "Log: User exiting early (%d seconds remaining)\n", seconds_remaining);
       break;
     }
 
-    // If we have an error limit, check it here and see if we should exit.
-    if (max_errorcount_ != 0) {
-      uint64 errors = GetTotalErrorCount();
-      if (errors > max_errorcount_) {
-        logprintf(0, "Log: Exiting early (%d seconds remaining) "
-                     "due to excessive failures (%lld)\n",
-                  seconds_remaining,
-                  errors);
-        break;
-      }
+    if (max_errorcount_ != 0 && GetTotalErrorCount() > max_errorcount_) {
+      logprintf(0, "Log: Exiting early (%d seconds remaining) due to excessive failures (%lld)\n",
+                seconds_remaining, GetTotalErrorCount());
+      break;
     }
 
     if (now >= next_print) {
-      // Print a count down message.
       logprintf(5, "Log: Seconds remaining: %d\n", seconds_remaining);
       next_print = NextOccurance(print_delay_, start, now);
     }
 
     if (next_injection && now >= next_injection) {
-      // Inject an error.
-      logprintf(4, "Log: Injecting error (%d seconds remaining)\n",
-                seconds_remaining);
+      logprintf(4, "Log: Injecting error (%d seconds remaining)\n", seconds_remaining);
       struct page_entry src;
       GetValid(&src);
       src.pattern = patternlist_->GetPattern(0);
@@ -1980,9 +1943,7 @@ bool Sat::Run() {
     }
 
     if (next_pause && now >= next_pause) {
-      // Tell worker threads to pause in preparation for a power spike.
-      logprintf(4, "Log: Pausing worker threads in preparation for power spike "
-                "(%d seconds remaining)\n", seconds_remaining);
+      logprintf(4, "Log: Pausing worker threads in preparation for power spike (%d seconds remaining)\n", seconds_remaining);
       power_spike_status_.PauseWorkers();
       logprintf(12, "Log: Worker threads paused\n");
       next_pause = 0;
@@ -1990,12 +1951,10 @@ bool Sat::Run() {
     }
 
     if (next_resume && now >= next_resume) {
-      // Tell worker threads to resume in order to cause a power spike.
-      logprintf(4, "Log: Resuming worker threads to cause a power spike (%d "
-                "seconds remaining)\n", seconds_remaining);
+      logprintf(4, "Log: Resuming worker threads to cause a power spike (%d seconds remaining)\n", seconds_remaining);
       power_spike_status_.ResumeWorkers();
       logprintf(12, "Log: Worker threads resumed\n");
-      next_pause = NextOccurance(pause_delay_, start, now);
+      next_pause = now + pause_delay_;  // Schedule next pause after the current pause ends
       next_resume = 0;
     }
 
